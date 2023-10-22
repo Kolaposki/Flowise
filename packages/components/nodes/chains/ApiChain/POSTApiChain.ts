@@ -3,11 +3,12 @@ import { getBaseClasses } from '../../../src/utils'
 import { BaseLanguageModel } from 'langchain/base_language'
 import { PromptTemplate } from 'langchain/prompts'
 import { API_RESPONSE_RAW_PROMPT_TEMPLATE, API_URL_RAW_PROMPT_TEMPLATE, APIChain } from './postCore'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 
 class POSTApiChain_Chains implements INode {
     label: string
     name: string
+    version: number
     type: string
     icon: string
     category: string
@@ -18,6 +19,7 @@ class POSTApiChain_Chains implements INode {
     constructor() {
         this.label = 'POST API Chain'
         this.name = 'postApiChain'
+        this.version = 1.0
         this.type = 'POSTApiChain'
         this.icon = 'apichain.svg'
         this.category = 'Chains'
@@ -86,13 +88,14 @@ class POSTApiChain_Chains implements INode {
 
         const chain = await getAPIChain(apiDocs, model, headers, urlPrompt, ansPrompt)
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const callbacks = await additionalCallbacks(nodeData, options)
 
         if (options.socketIO && options.socketIOClientId) {
             const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId, 2)
-            const res = await chain.run(input, [loggerHandler, handler])
+            const res = await chain.run(input, [loggerHandler, handler, ...callbacks])
             return res
         } else {
-            const res = await chain.run(input, [loggerHandler])
+            const res = await chain.run(input, [loggerHandler, ...callbacks])
             return res
         }
     }

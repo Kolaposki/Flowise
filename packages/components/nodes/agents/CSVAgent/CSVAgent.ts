@@ -4,11 +4,12 @@ import { getBaseClasses } from '../../../src/utils'
 import { LoadPyodide, finalSystemPrompt, systemPrompt } from './core'
 import { LLMChain } from 'langchain/chains'
 import { BaseLanguageModel } from 'langchain/base_language'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 
 class CSV_Agents implements INode {
     label: string
     name: string
+    version: number
     description: string
     type: string
     icon: string
@@ -19,6 +20,7 @@ class CSV_Agents implements INode {
     constructor() {
         this.label = 'CSV Agent'
         this.name = 'csvAgent'
+        this.version = 1.0
         this.type = 'AgentExecutor'
         this.category = 'Agents'
         this.icon = 'csvagent.png'
@@ -35,6 +37,16 @@ class CSV_Agents implements INode {
                 label: 'Language Model',
                 name: 'model',
                 type: 'BaseLanguageModel'
+            },
+            {
+                label: 'System Message',
+                name: 'systemMessagePrompt',
+                type: 'string',
+                rows: 4,
+                additionalParams: true,
+                optional: true,
+                placeholder:
+                    'I want you to act as a document that I am having a conversation with. Your name is "AI Assistant". You will provide me with answers from the given info. If the answer is not included, say exactly "Hmm, I am not sure." and stop after that. Refuse to answer any question not about the info. Never break character.'
             }
         ]
     }
@@ -47,9 +59,11 @@ class CSV_Agents implements INode {
     async run(nodeData: INodeData, input: string, options: ICommonObject): Promise<string> {
         const csvFileBase64 = nodeData.inputs?.csvFile as string
         const model = nodeData.inputs?.model as BaseLanguageModel
+        const systemMessagePrompt = nodeData.inputs?.systemMessagePrompt as string
 
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
         const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
+        const callbacks = await additionalCallbacks(nodeData, options)
 
         let files: string[] = []
 
@@ -92,7 +106,6 @@ json.dumps(my_dict)`
         } catch (error) {
             throw new Error(error)
         }
-        options.logger.debug('[components/CSVAgent] [1] DataframeColDict =>', dataframeColDict)
 
         // Then tell GPT to come out with ONLY python code
         // For example: len(df), df[df['SibSp'] > 3]['PassengerId'].count()
@@ -107,10 +120,9 @@ json.dumps(my_dict)`
                 dict: dataframeColDict,
                 question: input
             }
-            const res = await chain.call(inputs, [loggerHandler])
+            const res = await chain.call(inputs, [loggerHandler, ...callbacks])
             pythonCode = res?.text
         }
-        options.logger.debug('[components/CSVAgent] [2] Generated Python Code =>', pythonCode)
 
         // Then run the code using Pyodide
         let finalResult = ''
@@ -122,13 +134,14 @@ json.dumps(my_dict)`
                 throw new Error(`Sorry, I'm unable to find answer for question: "${input}" using follwoing code: "${pythonCode}"`)
             }
         }
-        options.logger.debug('[components/CSVAgent] [3] Pyodide Result =>', finalResult)
 
         // Finally, return a complete answer
         if (finalResult) {
             const chain = new LLMChain({
                 llm: model,
-                prompt: PromptTemplate.fromTemplate(finalSystemPrompt),
+                prompt: PromptTemplate.fromTemplate(
+                    systemMessagePrompt ? `${systemMessagePrompt}\n${finalSystemPrompt}` : finalSystemPrompt
+                ),
                 verbose: process.env.DEBUG === 'true' ? true : false
             })
             const inputs = {
@@ -137,12 +150,10 @@ json.dumps(my_dict)`
             }
 
             if (options.socketIO && options.socketIOClientId) {
-                const result = await chain.call(inputs, [loggerHandler, handler])
-                options.logger.debug('[components/CSVAgent] [4] Final Result =>', result?.text)
+                const result = await chain.call(inputs, [loggerHandler, handler, ...callbacks])
                 return result?.text
             } else {
-                const result = await chain.call(inputs, [loggerHandler])
-                options.logger.debug('[components/CSVAgent] [4] Final Result =>', result?.text)
+                const result = await chain.call(inputs, [loggerHandler, ...callbacks])
                 return result?.text
             }
         }

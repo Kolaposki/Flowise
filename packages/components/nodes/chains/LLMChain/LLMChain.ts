@@ -2,11 +2,12 @@ import { ICommonObject, INode, INodeData, INodeOutputsValue, INodeParams } from 
 import { getBaseClasses, handleEscapeCharacters } from '../../../src/utils'
 import { LLMChain } from 'langchain/chains'
 import { BaseLanguageModel } from 'langchain/base_language'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 
 class LLMChain_Chains implements INode {
     label: string
     name: string
+    version: number
     type: string
     icon: string
     category: string
@@ -18,6 +19,7 @@ class LLMChain_Chains implements INode {
     constructor() {
         this.label = 'LLM Chain'
         this.name = 'llmChain'
+        this.version = 1.0
         this.type = 'LLMChain'
         this.icon = 'chain.svg'
         this.category = 'Chains'
@@ -68,7 +70,7 @@ class LLMChain_Chains implements INode {
         } else if (output === 'outputPrediction') {
             const chain = new LLMChain({ llm: model, prompt, verbose: process.env.DEBUG === 'true' ? true : false })
             const inputVariables = chain.prompt.inputVariables as string[] // ["product"]
-            const res = await runPrediction(inputVariables, chain, input, promptValues, options)
+            const res = await runPrediction(inputVariables, chain, input, promptValues, options, nodeData)
             // eslint-disable-next-line no-console
             console.log('\x1b[92m\x1b[1m\n*****OUTPUT PREDICTION*****\n\x1b[0m\x1b[0m')
             // eslint-disable-next-line no-console
@@ -86,7 +88,7 @@ class LLMChain_Chains implements INode {
         const inputVariables = nodeData.instance.prompt.inputVariables as string[] // ["product"]
         const chain = nodeData.instance as LLMChain
         const promptValues = nodeData.inputs?.prompt.promptValues as ICommonObject
-        const res = await runPrediction(inputVariables, chain, input, promptValues, options)
+        const res = await runPrediction(inputVariables, chain, input, promptValues, options, nodeData)
         // eslint-disable-next-line no-console
         console.log('\x1b[93m\x1b[1m\n*****FINAL RESULT*****\n\x1b[0m\x1b[0m')
         // eslint-disable-next-line no-console
@@ -100,9 +102,12 @@ const runPrediction = async (
     chain: LLMChain,
     input: string,
     promptValuesRaw: ICommonObject,
-    options: ICommonObject
+    options: ICommonObject,
+    nodeData: INodeData
 ) => {
     const loggerHandler = new ConsoleCallbackHandler(options.logger)
+    const callbacks = await additionalCallbacks(nodeData, options)
+
     const isStreaming = options.socketIO && options.socketIOClientId
     const socketIO = isStreaming ? options.socketIO : undefined
     const socketIOClientId = isStreaming ? options.socketIOClientId : ''
@@ -114,16 +119,7 @@ const runPrediction = async (
      */
     const promptValues = handleEscapeCharacters(promptValuesRaw, true)
 
-    if (inputVariables.length === 1) {
-        if (isStreaming) {
-            const handler = new CustomChainHandler(socketIO, socketIOClientId)
-            const res = await chain.run(input, [loggerHandler, handler])
-            return res
-        } else {
-            const res = await chain.run(input, [loggerHandler])
-            return res
-        }
-    } else if (inputVariables.length > 1) {
+    if (promptValues && inputVariables.length > 0) {
         let seen: string[] = []
 
         for (const variable of inputVariables) {
@@ -138,10 +134,10 @@ const runPrediction = async (
             const options = { ...promptValues }
             if (isStreaming) {
                 const handler = new CustomChainHandler(socketIO, socketIOClientId)
-                const res = await chain.call(options, [loggerHandler, handler])
+                const res = await chain.call(options, [loggerHandler, handler, ...callbacks])
                 return res?.text
             } else {
-                const res = await chain.call(options, [loggerHandler])
+                const res = await chain.call(options, [loggerHandler, ...callbacks])
                 return res?.text
             }
         } else if (seen.length === 1) {
@@ -154,10 +150,10 @@ const runPrediction = async (
             }
             if (isStreaming) {
                 const handler = new CustomChainHandler(socketIO, socketIOClientId)
-                const res = await chain.call(options, [loggerHandler, handler])
+                const res = await chain.call(options, [loggerHandler, handler, ...callbacks])
                 return res?.text
             } else {
-                const res = await chain.call(options, [loggerHandler])
+                const res = await chain.call(options, [loggerHandler, ...callbacks])
                 return res?.text
             }
         } else {
@@ -166,10 +162,10 @@ const runPrediction = async (
     } else {
         if (isStreaming) {
             const handler = new CustomChainHandler(socketIO, socketIOClientId)
-            const res = await chain.run(input, [loggerHandler, handler])
+            const res = await chain.run(input, [loggerHandler, handler, ...callbacks])
             return res
         } else {
-            const res = await chain.run(input, [loggerHandler])
+            const res = await chain.run(input, [loggerHandler, ...callbacks])
             return res
         }
     }

@@ -5,6 +5,7 @@ import { ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemp
 class ChatPromptTemplate_Prompts implements INode {
     label: string
     name: string
+    version: number
     description: string
     type: string
     icon: string
@@ -15,6 +16,7 @@ class ChatPromptTemplate_Prompts implements INode {
     constructor() {
         this.label = 'Chat Prompt Template'
         this.name = 'chatPromptTemplate'
+        this.version = 1.0
         this.type = 'ChatPromptTemplate'
         this.icon = 'prompt.svg'
         this.category = 'Prompts'
@@ -51,7 +53,7 @@ class ChatPromptTemplate_Prompts implements INode {
         const humanMessagePrompt = nodeData.inputs?.humanMessagePrompt as string
         const promptValuesStr = nodeData.inputs?.promptValues as string
 
-        const prompt = ChatPromptTemplate.fromPromptMessages([
+        const prompt = ChatPromptTemplate.fromMessages([
             SystemMessagePromptTemplate.fromTemplate(systemMessagePrompt),
             HumanMessagePromptTemplate.fromTemplate(humanMessagePrompt)
         ])

@@ -11,6 +11,7 @@ import { IconArrowsMaximize, IconEdit, IconAlertTriangle } from '@tabler/icons'
 
 // project import
 import { Dropdown } from 'ui-component/dropdown/Dropdown'
+import { MultiDropdown } from 'ui-component/dropdown/MultiDropdown'
 import { AsyncDropdown } from 'ui-component/dropdown/AsyncDropdown'
 import { Input } from 'ui-component/input/Input'
 import { File } from 'ui-component/file/File'
@@ -21,8 +22,13 @@ import { JsonEditorInput } from 'ui-component/json/JsonEditor'
 import { TooltipWithParser } from 'ui-component/tooltip/TooltipWithParser'
 import ToolDialog from 'views/tools/ToolDialog'
 import FormatPromptValuesDialog from 'ui-component/dialog/FormatPromptValuesDialog'
+import CredentialInputHandler from './CredentialInputHandler'
 
+// utils
 import { getInputVariables } from 'utils/genericHelper'
+
+// const
+import { FLOWISE_CREDENTIAL_ID } from 'store/constant'
 
 const EDITABLE_TOOLS = ['selectedTool']
 
@@ -226,6 +232,17 @@ const NodeInputHandler = ({ inputAnchor, inputParam, data, disabled = false, isA
                                 <span style={{ color: 'rgb(116,66,16)', marginLeft: 10 }}>{inputParam.warning}</span>
                             </div>
                         )}
+                        {inputParam.type === 'credential' && (
+                            <CredentialInputHandler
+                                disabled={disabled}
+                                data={data}
+                                inputParam={inputParam}
+                                onSelect={(newValue) => {
+                                    data.credential = newValue
+                                    data.inputs[FLOWISE_CREDENTIAL_ID] = newValue // in case data.credential is not updated
+                                }}
+                            />
+                        )}
                         {inputParam.type === 'file' && (
                             <File
                                 disabled={disabled}
@@ -285,6 +302,15 @@ const NodeInputHandler = ({ inputAnchor, inputParam, data, disabled = false, isA
                         )}
                         {inputParam.type === 'options' && (
                             <Dropdown
+                                disabled={disabled}
+                                name={inputParam.name}
+                                options={inputParam.options}
+                                onSelect={(newValue) => (data.inputs[inputParam.name] = newValue)}
+                                value={data.inputs[inputParam.name] ?? inputParam.default ?? 'choose an option'}
+                            />
+                        )}
+                        {inputParam.type === 'multiOptions' && (
+                            <MultiDropdown
                                 disabled={disabled}
                                 name={inputParam.name}
                                 options={inputParam.options}

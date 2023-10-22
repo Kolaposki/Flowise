@@ -13,18 +13,35 @@ import {
     IReactFlowNode,
     IVariableDict,
     INodeData,
-    IOverrideConfig
+    IOverrideConfig,
+    ICredentialDataDecrypted,
+    IComponentCredentials,
+    ICredentialReqBody
 } from '../Interface'
-import { cloneDeep, get, omit, merge } from 'lodash'
-import { ICommonObject, getInputVariables, IDatabaseEntity, handleEscapeCharacters } from 'flowise-components'
+import { cloneDeep, get, isEqual } from 'lodash'
+import {
+    ICommonObject,
+    getInputVariables,
+    IDatabaseEntity,
+    handleEscapeCharacters,
+    IMessage,
+    convertChatHistoryToText
+} from 'flowise-components'
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto'
-import { ChatFlow } from '../entity/ChatFlow'
-import { ChatMessage } from '../entity/ChatMessage'
-import { Tool } from '../entity/Tool'
+import { AES, enc } from 'crypto-js'
+
+import { ChatFlow } from '../database/entities/ChatFlow'
+import { ChatMessage } from '../database/entities/ChatMessage'
+import { Credential } from '../database/entities/Credential'
+import { Tool } from '../database/entities/Tool'
 import { DataSource } from 'typeorm'
+import { CachePool } from '../CachePool'
 
 const QUESTION_VAR_PREFIX = 'question'
-export const databaseEntities: IDatabaseEntity = { ChatFlow: ChatFlow, ChatMessage: ChatMessage, Tool: Tool }
+const CHAT_HISTORY_VAR_PREFIX = 'chat_history'
+const REDACTED_CREDENTIAL_VALUE = '_FLOWISE_BLANK_07167752-1a71-43b1-bf8f-4f32252165db'
+
+export const databaseEntities: IDatabaseEntity = { ChatFlow: ChatFlow, ChatMessage: ChatMessage, Tool: Tool, Credential: Credential }
 
 /**
  * Returns the home folder path of the user if
@@ -174,15 +191,17 @@ export const getEndingNode = (nodeDependencies: INodeDependencies, graph: INodeD
 
 /**
  * Build langchain from start to end
- * @param {string} startingNodeId
+ * @param {string[]} startingNodeIds
  * @param {IReactFlowNode[]} reactFlowNodes
  * @param {INodeDirectedGraph} graph
  * @param {IDepthQueue} depthQueue
  * @param {IComponentNodes} componentNodes
  * @param {string} question
  * @param {string} chatId
+ * @param {string} chatflowid
  * @param {DataSource} appDataSource
  * @param {ICommonObject} overrideConfig
+ * @param {CachePool} cachePool
  */
 export const buildLangchain = async (
     startingNodeIds: string[],
@@ -191,9 +210,12 @@ export const buildLangchain = async (
     depthQueue: IDepthQueue,
     componentNodes: IComponentNodes,
     question: string,
+    chatHistory: IMessage[],
     chatId: string,
+    chatflowid: string,
     appDataSource: DataSource,
-    overrideConfig?: ICommonObject
+    overrideConfig?: ICommonObject,
+    cachePool?: CachePool
 ) => {
     const flowNodes = cloneDeep(reactFlowNodes)
 
@@ -223,14 +245,16 @@ export const buildLangchain = async (
 
             let flowNodeData = cloneDeep(reactFlowNode.data)
             if (overrideConfig) flowNodeData = replaceInputsWithConfig(flowNodeData, overrideConfig)
-            const reactFlowNodeData: INodeData = resolveVariables(flowNodeData, flowNodes, question)
+            const reactFlowNodeData: INodeData = resolveVariables(flowNodeData, flowNodes, question, chatHistory)
 
             logger.debug(`[server]: Initializing ${reactFlowNode.data.label} (${reactFlowNode.data.id})`)
             flowNodes[nodeIndex].data.instance = await newNodeInstance.init(reactFlowNodeData, question, {
                 chatId,
+                chatflowid,
                 appDataSource,
                 databaseEntities,
-                logger
+                logger,
+                cachePool
             })
             logger.debug(`[server]: Finished initializing ${reactFlowNode.data.label} (${reactFlowNode.data.id})`)
         } catch (e: any) {
@@ -278,12 +302,14 @@ export const buildLangchain = async (
  * @param {IReactFlowNode[]} reactFlowNodes
  * @param {IComponentNodes} componentNodes
  * @param {string} chatId
+ * @param {DataSource} appDataSource
  * @param {string} sessionId
  */
 export const clearSessionMemory = async (
     reactFlowNodes: IReactFlowNode[],
     componentNodes: IComponentNodes,
     chatId: string,
+    appDataSource: DataSource,
     sessionId?: string
 ) => {
     for (const node of reactFlowNodes) {
@@ -292,7 +318,8 @@ export const clearSessionMemory = async (
         const nodeModule = await import(nodeInstanceFilePath)
         const newNodeInstance = new nodeModule.nodeClass()
         if (sessionId && node.data.inputs) node.data.inputs.sessionId = sessionId
-        if (newNodeInstance.clearSessionMemory) await newNodeInstance?.clearSessionMemory(node.data, { chatId })
+        if (newNodeInstance.clearSessionMemory)
+            await newNodeInstance?.clearSessionMemory(node.data, { chatId, appDataSource, databaseEntities, logger })
     }
 }
 
@@ -304,7 +331,13 @@ export const clearSessionMemory = async (
  * @param {boolean} isAcceptVariable
  * @returns {string}
  */
-export const getVariableValue = (paramValue: string, reactFlowNodes: IReactFlowNode[], question: string, isAcceptVariable = false) => {
+export const getVariableValue = (
+    paramValue: string,
+    reactFlowNodes: IReactFlowNode[],
+    question: string,
+    chatHistory: IMessage[],
+    isAcceptVariable = false
+) => {
     let returnVal = paramValue
     const variableStack = []
     const variableDict = {} as IVariableDict
@@ -332,6 +365,10 @@ export const getVariableValue = (paramValue: string, reactFlowNodes: IReactFlowN
              */
             if (isAcceptVariable && variableFullPath === QUESTION_VAR_PREFIX) {
                 variableDict[`{{${variableFullPath}}}`] = handleEscapeCharacters(question, false)
+            }
+
+            if (isAcceptVariable && variableFullPath === CHAT_HISTORY_VAR_PREFIX) {
+                variableDict[`{{${variableFullPath}}}`] = handleEscapeCharacters(convertChatHistoryToText(chatHistory), false)
             }
 
             // Split by first occurrence of '.' to get just nodeId
@@ -364,38 +401,19 @@ export const getVariableValue = (paramValue: string, reactFlowNodes: IReactFlowN
 }
 
 /**
- * Temporarily disable streaming if vectorStore is Faiss
- * @param {INodeData} flowNodeData
- * @returns {boolean}
- */
-export const isVectorStoreFaiss = (flowNodeData: INodeData) => {
-    if (flowNodeData.inputs && flowNodeData.inputs.vectorStoreRetriever) {
-        const vectorStoreRetriever = flowNodeData.inputs.vectorStoreRetriever
-        if (typeof vectorStoreRetriever === 'string' && vectorStoreRetriever.includes('faiss')) return true
-        if (
-            typeof vectorStoreRetriever === 'object' &&
-            vectorStoreRetriever.vectorStore &&
-            vectorStoreRetriever.vectorStore.constructor.name === 'FaissStore'
-        )
-            return true
-    }
-    return false
-}
-
-/**
  * Loop through each inputs and resolve variable if neccessary
  * @param {INodeData} reactFlowNodeData
  * @param {IReactFlowNode[]} reactFlowNodes
  * @param {string} question
  * @returns {INodeData}
  */
-export const resolveVariables = (reactFlowNodeData: INodeData, reactFlowNodes: IReactFlowNode[], question: string): INodeData => {
+export const resolveVariables = (
+    reactFlowNodeData: INodeData,
+    reactFlowNodes: IReactFlowNode[],
+    question: string,
+    chatHistory: IMessage[]
+): INodeData => {
     let flowNodeData = cloneDeep(reactFlowNodeData)
-    if (reactFlowNodeData.instance && isVectorStoreFaiss(reactFlowNodeData)) {
-        // omit and merge because cloneDeep of instance gives "Illegal invocation" Exception
-        const flowNodeDataWithoutInstance = cloneDeep(omit(reactFlowNodeData, ['instance']))
-        flowNodeData = merge(flowNodeDataWithoutInstance, { instance: reactFlowNodeData.instance })
-    }
     const types = 'inputs'
 
     const getParamValues = (paramsObj: ICommonObject) => {
@@ -404,13 +422,13 @@ export const resolveVariables = (reactFlowNodeData: INodeData, reactFlowNodes: I
             if (Array.isArray(paramValue)) {
                 const resolvedInstances = []
                 for (const param of paramValue) {
-                    const resolvedInstance = getVariableValue(param, reactFlowNodes, question)
+                    const resolvedInstance = getVariableValue(param, reactFlowNodes, question, chatHistory)
                     resolvedInstances.push(resolvedInstance)
                 }
                 paramsObj[key] = resolvedInstances
             } else {
                 const isAcceptVariable = reactFlowNodeData.inputParams.find((param) => param.name === key)?.acceptVariable ?? false
-                const resolvedInstance = getVariableValue(paramValue, reactFlowNodes, question, isAcceptVariable)
+                const resolvedInstance = getVariableValue(paramValue, reactFlowNodes, question, chatHistory, isAcceptVariable)
                 paramsObj[key] = resolvedInstance
             }
         }
@@ -434,6 +452,15 @@ export const replaceInputsWithConfig = (flowNodeData: INodeData, overrideConfig:
 
     const getParamValues = (paramsObj: ICommonObject) => {
         for (const config in overrideConfig) {
+            // If overrideConfig[key] is object
+            if (overrideConfig[config] && typeof overrideConfig[config] === 'object') {
+                const nodeIds = Object.keys(overrideConfig[config])
+                if (nodeIds.includes(flowNodeData.id)) {
+                    paramsObj[config] = overrideConfig[config][flowNodeData.id]
+                    continue
+                }
+            }
+
             let paramValue = overrideConfig[config] ?? paramsObj[config]
             // Check if boolean
             if (paramValue === 'true') paramValue = true
@@ -455,12 +482,17 @@ export const replaceInputsWithConfig = (flowNodeData: INodeData, overrideConfig:
  * @param {IReactFlowNode[]} startingNodes
  * @returns {boolean}
  */
-export const isStartNodeDependOnInput = (startingNodes: IReactFlowNode[]): boolean => {
+export const isStartNodeDependOnInput = (startingNodes: IReactFlowNode[], nodes: IReactFlowNode[]): boolean => {
     for (const node of startingNodes) {
+        if (node.data.category === 'Cache') return true
         for (const inputName in node.data.inputs) {
             const inputVariables = getInputVariables(node.data.inputs[inputName])
             if (inputVariables.length > 0) return true
         }
+    }
+    const whitelistNodeNames = ['vectorStoreToDocument', 'autoGPT']
+    for (const node of nodes) {
+        if (whitelistNodeNames.includes(node.data.name)) return true
     }
     return false
 }
@@ -487,7 +519,7 @@ export const isSameOverrideConfig = (
         Object.keys(existingOverrideConfig).length &&
         newOverrideConfig &&
         Object.keys(newOverrideConfig).length &&
-        JSON.stringify(existingOverrideConfig) === JSON.stringify(newOverrideConfig)
+        isEqual(existingOverrideConfig, newOverrideConfig)
     ) {
         return true
     }
@@ -652,19 +684,30 @@ export const mapMimeTypeToInputField = (mimeType: string) => {
             return 'jsonFile'
         case 'text/csv':
             return 'csvFile'
+        case 'application/json-lines':
+        case 'application/jsonl':
+        case 'text/jsonl':
+            return 'jsonlinesFile'
         case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
             return 'docxFile'
+        case 'application/vnd.yaml':
+        case 'application/x-yaml':
+        case 'text/vnd.yaml':
+        case 'text/x-yaml':
+        case 'text/yaml':
+            return 'yamlFile'
         default:
             return ''
     }
 }
 
 /**
- * Find all available inpur params config
+ * Find all available input params config
  * @param {IReactFlowNode[]} reactFlowNodes
- * @returns {Promise<IOverrideConfig[]>}
+ * @param {IComponentCredentials} componentCredentials
+ * @returns {IOverrideConfig[]}
  */
-export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[]) => {
+export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[], componentCredentials: IComponentCredentials) => {
     const configs: IOverrideConfig[] = []
 
     for (const flowNode of reactFlowNodes) {
@@ -673,6 +716,7 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[]) => {
             if (inputParam.type === 'file') {
                 obj = {
                     node: flowNode.data.label,
+                    nodeId: flowNode.data.id,
                     label: inputParam.label,
                     name: 'files',
                     type: inputParam.fileType ?? inputParam.type
@@ -680,6 +724,7 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[]) => {
             } else if (inputParam.type === 'options') {
                 obj = {
                     node: flowNode.data.label,
+                    nodeId: flowNode.data.id,
                     label: inputParam.label,
                     name: inputParam.name,
                     type: inputParam.options
@@ -690,9 +735,28 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[]) => {
                               .join(', ')
                         : 'string'
                 }
+            } else if (inputParam.type === 'credential') {
+                // get component credential inputs
+                for (const name of inputParam.credentialNames ?? []) {
+                    if (Object.prototype.hasOwnProperty.call(componentCredentials, name)) {
+                        const inputs = componentCredentials[name]?.inputs ?? []
+                        for (const input of inputs) {
+                            obj = {
+                                node: flowNode.data.label,
+                                nodeId: flowNode.data.id,
+                                label: input.label,
+                                name: input.name,
+                                type: input.type === 'password' ? 'string' : input.type
+                            }
+                            configs.push(obj)
+                        }
+                    }
+                }
+                continue
             } else {
                 obj = {
                     node: flowNode.data.label,
+                    nodeId: flowNode.data.id,
                     label: inputParam.label,
                     name: inputParam.name,
                     type: inputParam.type === 'password' ? 'string' : inputParam.type
@@ -715,8 +779,8 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[]) => {
  */
 export const isFlowValidForStream = (reactFlowNodes: IReactFlowNode[], endingNodeData: INodeData) => {
     const streamAvailableLLMs = {
-        'Chat Models': ['azureChatOpenAI', 'chatOpenAI', 'chatAnthropic'],
-        LLMs: ['azureOpenAI', 'openAI']
+        'Chat Models': ['azureChatOpenAI', 'chatOpenAI', 'chatAnthropic', 'chatOllama'],
+        LLMs: ['azureOpenAI', 'openAI', 'ollama']
     }
 
     let isChatOrLLMsExist = false
@@ -736,9 +800,136 @@ export const isFlowValidForStream = (reactFlowNodes: IReactFlowNode[], endingNod
         isValidChainOrAgent = !blacklistChains.includes(endingNodeData.name)
     } else if (endingNodeData.category === 'Agents') {
         // Agent that are available to stream
-        const whitelistAgents = ['openAIFunctionAgent', 'csvAgent', 'airtableAgent']
+        const whitelistAgents = ['openAIFunctionAgent', 'csvAgent', 'airtableAgent', 'conversationalRetrievalAgent']
         isValidChainOrAgent = whitelistAgents.includes(endingNodeData.name)
     }
 
-    return isChatOrLLMsExist && isValidChainOrAgent && !isVectorStoreFaiss(endingNodeData) && process.env.EXECUTION_MODE !== 'child'
+    return isChatOrLLMsExist && isValidChainOrAgent
+}
+
+/**
+ * Returns the path of encryption key
+ * @returns {string}
+ */
+export const getEncryptionKeyPath = (): string => {
+    return process.env.SECRETKEY_PATH
+        ? path.join(process.env.SECRETKEY_PATH, 'encryption.key')
+        : path.join(__dirname, '..', '..', 'encryption.key')
+}
+
+/**
+ * Generate an encryption key
+ * @returns {string}
+ */
+export const generateEncryptKey = (): string => {
+    return randomBytes(24).toString('base64')
+}
+
+/**
+ * Returns the encryption key
+ * @returns {Promise<string>}
+ */
+export const getEncryptionKey = async (): Promise<string> => {
+    if (process.env.FLOWISE_SECRETKEY_OVERWRITE !== undefined && process.env.FLOWISE_SECRETKEY_OVERWRITE !== '') {
+        return process.env.FLOWISE_SECRETKEY_OVERWRITE
+    }
+    try {
+        return await fs.promises.readFile(getEncryptionKeyPath(), 'utf8')
+    } catch (error) {
+        const encryptKey = generateEncryptKey()
+        await fs.promises.writeFile(getEncryptionKeyPath(), encryptKey)
+        return encryptKey
+    }
+}
+
+/**
+ * Encrypt credential data
+ * @param {ICredentialDataDecrypted} plainDataObj
+ * @returns {Promise<string>}
+ */
+export const encryptCredentialData = async (plainDataObj: ICredentialDataDecrypted): Promise<string> => {
+    const encryptKey = await getEncryptionKey()
+    return AES.encrypt(JSON.stringify(plainDataObj), encryptKey).toString()
+}
+
+/**
+ * Decrypt credential data
+ * @param {string} encryptedData
+ * @param {string} componentCredentialName
+ * @param {IComponentCredentials} componentCredentials
+ * @returns {Promise<ICredentialDataDecrypted>}
+ */
+export const decryptCredentialData = async (
+    encryptedData: string,
+    componentCredentialName?: string,
+    componentCredentials?: IComponentCredentials
+): Promise<ICredentialDataDecrypted> => {
+    const encryptKey = await getEncryptionKey()
+    const decryptedData = AES.decrypt(encryptedData, encryptKey)
+    try {
+        if (componentCredentialName && componentCredentials) {
+            const plainDataObj = JSON.parse(decryptedData.toString(enc.Utf8))
+            return redactCredentialWithPasswordType(componentCredentialName, plainDataObj, componentCredentials)
+        }
+        return JSON.parse(decryptedData.toString(enc.Utf8))
+    } catch (e) {
+        console.error(e)
+        return {}
+    }
+}
+
+/**
+ * Transform ICredentialBody from req to Credential entity
+ * @param {ICredentialReqBody} body
+ * @returns {Credential}
+ */
+export const transformToCredentialEntity = async (body: ICredentialReqBody): Promise<Credential> => {
+    const credentialBody: ICommonObject = {
+        name: body.name,
+        credentialName: body.credentialName
+    }
+
+    if (body.plainDataObj) {
+        const encryptedData = await encryptCredentialData(body.plainDataObj)
+        credentialBody.encryptedData = encryptedData
+    }
+
+    const newCredential = new Credential()
+    Object.assign(newCredential, credentialBody)
+
+    return newCredential
+}
+
+/**
+ * Redact values that are of password type to avoid sending back to client
+ * @param {string} componentCredentialName
+ * @param {ICredentialDataDecrypted} decryptedCredentialObj
+ * @param {IComponentCredentials} componentCredentials
+ * @returns {ICredentialDataDecrypted}
+ */
+export const redactCredentialWithPasswordType = (
+    componentCredentialName: string,
+    decryptedCredentialObj: ICredentialDataDecrypted,
+    componentCredentials: IComponentCredentials
+): ICredentialDataDecrypted => {
+    const plainDataObj = cloneDeep(decryptedCredentialObj)
+    for (const cred in plainDataObj) {
+        const inputParam = componentCredentials[componentCredentialName].inputs?.find((inp) => inp.type === 'password' && inp.name === cred)
+        if (inputParam) {
+            plainDataObj[cred] = REDACTED_CREDENTIAL_VALUE
+        }
+    }
+    return plainDataObj
+}
+
+/**
+ * Replace sessionId with new chatId
+ * Ex: after clear chat history, use the new chatId as sessionId
+ * @param {any} instance
+ * @param {string} chatId
+ */
+export const checkMemorySessionId = (instance: any, chatId: string) => {
+    if (instance.memory && instance.memory.isSessionIdUsingChatMessageId && chatId) {
+        instance.memory.sessionId = chatId
+    }
 }

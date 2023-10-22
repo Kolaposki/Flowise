@@ -14,6 +14,7 @@
                 "id": "recursiveCharacterTextSplitter_1",
                 "label": "Recursive Character Text Splitter",
                 "name": "recursiveCharacterTextSplitter",
+                "version": 1,
                 "type": "RecursiveCharacterTextSplitter",
                 "baseClasses": ["RecursiveCharacterTextSplitter", "TextSplitter"],
                 "category": "Text Splitters",
@@ -71,6 +72,7 @@
                 "id": "conversationalRetrievalQAChain_0",
                 "label": "Conversational Retrieval QA Chain",
                 "name": "conversationalRetrievalQAChain",
+                "version": 1,
                 "type": "ConversationalRetrievalQAChain",
                 "baseClasses": ["ConversationalRetrievalQAChain", "BaseChain", "BaseLangChain"],
                 "category": "Chains",
@@ -135,15 +137,16 @@
                     {
                         "label": "Memory",
                         "name": "memory",
-                        "type": "DynamoDBChatMemory | RedisBackedChatMemory | ZepMemory",
+                        "type": "BaseMemory",
                         "optional": true,
-                        "description": "If no memory connected, default BufferMemory will be used",
-                        "id": "conversationalRetrievalQAChain_0-input-memory-DynamoDBChatMemory | RedisBackedChatMemory | ZepMemory"
+                        "description": "If left empty, a default BufferMemory will be used",
+                        "id": "conversationalRetrievalQAChain_0-input-memory-BaseMemory"
                     }
                 ],
                 "inputs": {
                     "model": "{{chatLocalAI_0.data.instance}}",
-                    "vectorStoreRetriever": "{{faissUpsert_0.data.instance}}"
+                    "vectorStoreRetriever": "{{faissUpsert_0.data.instance}}",
+                    "memory": ""
                 },
                 "outputAnchors": [
                     {
@@ -176,6 +179,7 @@
                 "id": "faissUpsert_0",
                 "label": "Faiss Upsert Document",
                 "name": "faissUpsert",
+                "version": 1,
                 "type": "Faiss",
                 "baseClasses": ["Faiss", "VectorStoreRetriever", "BaseRetriever"],
                 "category": "Vector Stores",
@@ -261,13 +265,14 @@
             "id": "chatLocalAI_0",
             "position": {
                 "x": 1191.9512064167336,
-                "y": -44.05401001663306
+                "y": -94.05401001663306
             },
             "type": "customNode",
             "data": {
                 "id": "chatLocalAI_0",
                 "label": "ChatLocalAI",
                 "name": "chatLocalAI",
+                "version": 2,
                 "type": "ChatLocalAI",
                 "baseClasses": ["ChatLocalAI", "BaseChatModel", "LLM", "BaseLLM", "BaseLanguageModel", "BaseLangChain"],
                 "category": "Chat Models",
@@ -320,7 +325,15 @@
                         "id": "chatLocalAI_0-input-timeout-number"
                     }
                 ],
-                "inputAnchors": [],
+                "inputAnchors": [
+                    {
+                        "label": "Cache",
+                        "name": "cache",
+                        "type": "BaseCache",
+                        "optional": true,
+                        "id": "chatLocalAI_0-input-cache-BaseCache"
+                    }
+                ],
                 "inputs": {
                     "basePath": "http://localhost:8080/v1",
                     "modelName": "ggml-gpt4all-j.bin",
@@ -343,7 +356,7 @@
             "selected": false,
             "positionAbsolute": {
                 "x": 1191.9512064167336,
-                "y": -44.05401001663306
+                "y": -94.05401001663306
             },
             "dragging": false
         },
@@ -360,6 +373,7 @@
                 "id": "textFile_0",
                 "label": "Text File",
                 "name": "textFile",
+                "version": 1,
                 "type": "Document",
                 "baseClasses": ["Document"],
                 "category": "Document Loaders",
@@ -396,13 +410,29 @@
                 },
                 "outputAnchors": [
                     {
-                        "id": "textFile_0-output-textFile-Document",
-                        "name": "textFile",
-                        "label": "Document",
-                        "type": "Document"
+                        "name": "output",
+                        "label": "Output",
+                        "type": "options",
+                        "options": [
+                            {
+                                "id": "textFile_0-output-document-Document",
+                                "name": "document",
+                                "label": "Document",
+                                "type": "Document"
+                            },
+                            {
+                                "id": "textFile_0-output-text-string|json",
+                                "name": "text",
+                                "label": "Text",
+                                "type": "string | json"
+                            }
+                        ],
+                        "default": "document"
                     }
                 ],
-                "outputs": {},
+                "outputs": {
+                    "output": "document"
+                },
                 "selected": false
             },
             "selected": false,
@@ -425,6 +455,7 @@
                 "id": "localAIEmbeddings_0",
                 "label": "LocalAI Embeddings",
                 "name": "localAIEmbeddings",
+                "version": 1,
                 "type": "LocalAI Embeddings",
                 "baseClasses": ["LocalAI Embeddings", "Embeddings"],
                 "category": "Embeddings",

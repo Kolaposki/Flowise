@@ -1,42 +1,44 @@
 import { ICommonObject, INode, INodeData, INodeParams, PromptTemplate } from '../../../src/Interface'
 import { AgentExecutor } from 'langchain/agents'
-import { getBaseClasses } from '../../../src/utils'
+import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
 import { LoadPyodide, finalSystemPrompt, systemPrompt } from './core'
 import { LLMChain } from 'langchain/chains'
 import { BaseLanguageModel } from 'langchain/base_language'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 import axios from 'axios'
 
 class Airtable_Agents implements INode {
     label: string
     name: string
+    version: number
     description: string
     type: string
     icon: string
     category: string
     baseClasses: string[]
+    credential: INodeParams
     inputs: INodeParams[]
 
     constructor() {
         this.label = 'Airtable Agent'
         this.name = 'airtableAgent'
+        this.version = 1.0
         this.type = 'AgentExecutor'
         this.category = 'Agents'
         this.icon = 'airtable.svg'
         this.description = 'Agent used to to answer queries on Airtable table'
         this.baseClasses = [this.type, ...getBaseClasses(AgentExecutor)]
+        this.credential = {
+            label: 'Connect Credential',
+            name: 'credential',
+            type: 'credential',
+            credentialNames: ['airtableApi']
+        }
         this.inputs = [
             {
                 label: 'Language Model',
                 name: 'model',
                 type: 'BaseLanguageModel'
-            },
-            {
-                label: 'Personal Access Token',
-                name: 'accessToken',
-                type: 'password',
-                description:
-                    'Get personal access token from <a target="_blank" href="https://airtable.com/developers/web/guides/personal-access-tokens">official guide</a>'
             },
             {
                 label: 'Base Id',
@@ -67,7 +69,6 @@ class Airtable_Agents implements INode {
                 name: 'limit',
                 type: 'number',
                 default: 100,
-                step: 1,
                 additionalParams: true,
                 description: 'Number of results to return'
             }
@@ -81,11 +82,13 @@ class Airtable_Agents implements INode {
 
     async run(nodeData: INodeData, input: string, options: ICommonObject): Promise<string> {
         const model = nodeData.inputs?.model as BaseLanguageModel
-        const accessToken = nodeData.inputs?.accessToken as string
         const baseId = nodeData.inputs?.baseId as string
         const tableId = nodeData.inputs?.tableId as string
         const returnAll = nodeData.inputs?.returnAll as boolean
         const limit = nodeData.inputs?.limit as string
+
+        const credentialData = await getCredentialData(nodeData.credential ?? '', options)
+        const accessToken = getCredentialParam('accessToken', credentialData, nodeData)
 
         let airtableData: ICommonObject[] = []
 
@@ -99,6 +102,7 @@ class Airtable_Agents implements INode {
 
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
         const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
+        const callbacks = await additionalCallbacks(nodeData, options)
 
         const pyodide = await LoadPyodide()
 
@@ -124,7 +128,6 @@ json.dumps(my_dict)`
         } catch (error) {
             throw new Error(error)
         }
-        options.logger.debug('[components/AirtableAgent] [1] DataframeColDict =>', dataframeColDict)
 
         // Then tell GPT to come out with ONLY python code
         // For example: len(df), df[df['SibSp'] > 3]['PassengerId'].count()
@@ -139,10 +142,9 @@ json.dumps(my_dict)`
                 dict: dataframeColDict,
                 question: input
             }
-            const res = await chain.call(inputs, [loggerHandler])
+            const res = await chain.call(inputs, [loggerHandler, ...callbacks])
             pythonCode = res?.text
         }
-        options.logger.debug('[components/AirtableAgent] [2] Generated Python Code =>', pythonCode)
 
         // Then run the code using Pyodide
         let finalResult = ''
@@ -154,7 +156,6 @@ json.dumps(my_dict)`
                 throw new Error(`Sorry, I'm unable to find answer for question: "${input}" using follwoing code: "${pythonCode}"`)
             }
         }
-        options.logger.debug('[components/AirtableAgent] [3] Pyodide Result =>', finalResult)
 
         // Finally, return a complete answer
         if (finalResult) {
@@ -169,12 +170,10 @@ json.dumps(my_dict)`
             }
 
             if (options.socketIO && options.socketIOClientId) {
-                const result = await chain.call(inputs, [loggerHandler, handler])
-                options.logger.debug('[components/AirtableAgent] [4] Final Result =>', result?.text)
+                const result = await chain.call(inputs, [loggerHandler, handler, ...callbacks])
                 return result?.text
             } else {
-                const result = await chain.call(inputs, [loggerHandler])
-                options.logger.debug('[components/AirtableAgent] [4] Final Result =>', result?.text)
+                const result = await chain.call(inputs, [loggerHandler, ...callbacks])
                 return result?.text
             }
         }

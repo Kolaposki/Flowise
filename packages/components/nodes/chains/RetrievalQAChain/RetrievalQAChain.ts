@@ -1,13 +1,14 @@
 import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
 import { RetrievalQAChain } from 'langchain/chains'
-import { BaseRetriever } from 'langchain/schema'
+import { BaseRetriever } from 'langchain/schema/retriever'
 import { getBaseClasses } from '../../../src/utils'
 import { BaseLanguageModel } from 'langchain/base_language'
-import { ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
+import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 
 class RetrievalQAChain_Chains implements INode {
     label: string
     name: string
+    version: number
     type: string
     icon: string
     category: string
@@ -18,6 +19,7 @@ class RetrievalQAChain_Chains implements INode {
     constructor() {
         this.label = 'Retrieval QA Chain'
         this.name = 'retrievalQAChain'
+        this.version = 1.0
         this.type = 'RetrievalQAChain'
         this.icon = 'chain.svg'
         this.category = 'Chains'
@@ -51,13 +53,14 @@ class RetrievalQAChain_Chains implements INode {
             query: input
         }
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const callbacks = await additionalCallbacks(nodeData, options)
 
         if (options.socketIO && options.socketIOClientId) {
             const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
-            const res = await chain.call(obj, [loggerHandler, handler])
+            const res = await chain.call(obj, [loggerHandler, handler, ...callbacks])
             return res?.text
         } else {
-            const res = await chain.call(obj, [loggerHandler])
+            const res = await chain.call(obj, [loggerHandler, ...callbacks])
             return res?.text
         }
     }
